@@ -27,7 +27,7 @@ if (! -f $log) {
     my $xcodebin = $ENV{DEVELOPER_BIN_DIR}||'/usr/bin';
     my $archs = $ENV{ARCHS}||'arm64';
     my $args = join ' ', map { "'$_'" } @ARGV;
-    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs $args 2>&1 | tee $log";
+    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs -config Debug $args 2>&1 | tee $log";
     warn "Executing: $build\n";
     if (system $build) {
         unlink $log;
@@ -102,7 +102,8 @@ while (defined(my $line = nextLine())) {
     } elsif ($line =~ /^SwiftCompile \w+ \w+/) {
         my $cd = nextCD();
         ($line = nextLine()) =~ s/builtin-swiftTaskExecution -- |-frontend-parseable-output//g;
-        my @sources = extractOption($line, "-primary-file");
+        my @sources = extractOption($line, "-primary-file")
+            or die "Release/Whole module optimization not permitted";
         my @objects = extractOption($line, "-o");
         # print "# $line\n@sources -- @objects\n\n";
         dollarEscape $line;
