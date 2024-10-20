@@ -26,8 +26,9 @@ if (! -f $log) {
 
     my $xcodebin = $ENV{DEVELOPER_BIN_DIR}||'/usr/bin';
     my $archs = $ENV{ARCHS}||'arm64';
-    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs @ARGV 2>&1 | tee $log";
-    print "Executing: $build\n";
+    my $args = join ' ', map { "'$_'" } @ARGV;
+    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs $args 2>&1 | tee $log";
+    warn "Executing: $build\n";
     if (system $build) {
         unlink $log;
         exit 1;
@@ -44,20 +45,6 @@ my $MAKE = IO::File->new("> $make") or die "Could not open $make: $!";
 my $identity = $ENV{EXPANDED_CODE_SIGN_IDENTITY} || '-';
 print $MAKE "\ndefault: main\n\n";
 
-sub nextLine {
-    my $line = $LOG->getline() or return;
-    chomp $line;
-    return $line;
-}
-
-sub nextCD {
-    my ($cd) = nextLine() =~ /cd (.*)/;
-    $cd =~ s/\\([^\$'()&])/$1/g;
-    $cd =~ s/([ ])/\\$1/g;
-    $cd =~ s/\\\$/*/g;
-    return "\tcd $cd\n\t\t/usr/bin/time ";
-}
-
 # escape $ for make
 sub dollarEscape {
     $_[0] =~ s/\\\$/\\\$\$/g;
@@ -68,7 +55,23 @@ sub pathEscape {
     dollarEscape $_[0];
 }
 
-my $fileArg = "[^\\\\\\s]+(?:\\\\.[^\\\\\\s]*)*";
+# regex for file path argument
+my $notSpace = "[^\\\\\\s]";
+my $fileArg = "$notSpace+(?:\\\\.$notSpace*)*";
+
+sub nextLine {
+    my $line = $LOG->getline() or return;
+    chomp $line;
+    return $line;
+}
+
+sub nextCD {
+    my ($cd) = nextLine() =~ /cd (.*)/;
+    $cd =~ s/\\([^\$'()&])/$1/g;
+    $cd =~ s/([ ])/\\$1/g;
+    dollarEscape $cd;
+    return "\t\tcd $cd\n\t\t/usr/bin/time ";
+}
 
 # Extract values for the option from a command
 sub extractOption {
@@ -79,7 +82,6 @@ sub extractOption {
 my (%rules, @linked);
 
 while (defined(my $line = nextLine())) {
-    chomp $line;
     print $MAKE "# $line\n";
     # Add rules for "C" family sources.
     if (my ($object, $source) = $line =~
@@ -95,7 +97,7 @@ while (defined(my $line = nextLine())) {
         print $MAKE "\n$object: $source\n";
         pathEscape $object;
         dollarEscape $line;
-        print $MAKE "\t$cd$line && touch $object\n\n";
+        print $MAKE "$cd$line && touch $object\n\n";
     # Add rules for Swift sources (expand batches)
     } elsif ($line =~ /^SwiftCompile \w+ \w+/) {
         my $cd = nextCD();
@@ -111,7 +113,7 @@ while (defined(my $line = nextLine())) {
             next if $rules{$object}++;
             print $MAKE "\n$object: $sources[$i]\n";
             pathEscape $object;
-            print $MAKE "\t$cd$line && touch $object\n\n";
+            print $MAKE "$cd$line && touch $object\n\n";
         }
     # Add rule to link executables
     } elsif (my ($executable) = $line =~ /^Ld ($fileArg) /) {
@@ -130,8 +132,8 @@ while (defined(my $line = nextLine())) {
             print $MAKE " $object";
         }
         dollarEscape $line;
+        print $MAKE "\n$cd$line";
         pathEscape my $tosign = $executable;
-        print $MAKE "\n\t$cd$line";
         print $MAKE " && codesign -f -s '$identity' $tosign\n\n";
         push @linked, $executable if $executable !~ /\.o$/;
     }
