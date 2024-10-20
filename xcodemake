@@ -16,8 +16,8 @@ my $log = "xcodebuild.log";
 my $make = "Makefile";
 
 if (! -f $log) {
-    # Move Xcode's build database to one side so
-    # you can use xcodebuild inside a scheme.
+    # Move Xcode's build database to one side to
+    # be able to use xcodebuild inside a scheme.
     my $builddb = $ENV{OBJROOT};
     if ($builddb) {
         $builddb .= "/XCBuildData/build.db";
@@ -27,8 +27,11 @@ if (! -f $log) {
     my $xcodebin = $ENV{DEVELOPER_BIN_DIR}||'/usr/bin';
     my $archs = $ENV{ARCHS}||'arm64';
     my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs @ARGV 2>&1 | tee $log";
-    print "$build\n";
-    system $build;
+    print "Executing: $build\n";
+    if (system $build) {
+        unlink $log;
+        exit 1;
+    }
     unlink $make;
     
     rename $builddb.".save", $builddb if $builddb;
@@ -38,6 +41,7 @@ if (! -f $log) {
 if (! -f $make or -M $0 < -M $make) {
 my $LOG = IO::File->new("< $log") or die "Could not open $log: $!";
 my $MAKE = IO::File->new("> $make") or die "Could not open $make: $!";
+my $identity = $ENV{EXPANDED_CODE_SIGN_IDENTITY} || '-';
 print $MAKE "\ndefault: main\n\n";
 
 sub nextLine {
@@ -46,10 +50,30 @@ sub nextLine {
     return $line;
 }
 
+sub nextCD {
+    my ($cd) = nextLine() =~ /cd (.*)/;
+    $cd =~ s/\\([^\$'()&])/$1/g;
+    $cd =~ s/([ ])/\\$1/g;
+    $cd =~ s/\\\$/*/g;
+    return "\tcd $cd\n\t\t/usr/bin/time ";
+}
+
+# escape $ for make
+sub dollarEscape {
+    $_[0] =~ s/\\\$/\\\$\$/g;
+}
+# esacpe file path
+sub pathEscape {
+    $_[0] =~ s/([()])/\\$1/g;
+    dollarEscape $_[0];
+}
+
+my $fileArg = "[^\\\\\\s]+(?:\\\\.[^\\\\\\s]*)*";
+
 # Extract values for the option from a command
 sub extractOption {
     my ($line, $option) = @_;
-    return my @out = $line =~ / $option ([^\\\s]+(?:\\.[^\\\s]+)*)/g;
+    return my @a = $line =~ / $option ($fileArg)/g;
 }
 
 my (%rules, @linked);
@@ -59,43 +83,56 @@ while (defined(my $line = nextLine())) {
     print $MAKE "# $line\n";
     # Add rules for "C" family sources.
     if (my ($object, $source) = $line =~
-        /^CompileC (\S+?(?:\\.\S+?)*?) (\S+?(?:\\.\S+?)*?) /) {
-        my $cd = nextLine();
+        /^CompileC ($fileArg) ($fileArg) /) {
+        my $cd = nextCD();
         do {
             $line = nextLine();
         } while ($line =~ /^\s*$|response file/);
+        $object =~ s/\\([{}()])/$1/g;
+        $object =~ s/([\$&])/\\$1/g;
+        dollarEscape $source;
+        $source =~ s/\\'/'/g;
         print $MAKE "\n$object: $source\n";
-        print $MAKE "\t$cd\n\t$line && touch $object\n\n";
+        pathEscape $object;
+        dollarEscape $line;
+        print $MAKE "\t$cd$line && touch $object\n\n";
     # Add rules for Swift sources (expand batches)
     } elsif ($line =~ /^SwiftCompile \w+ \w+/) {
-        my $cd = nextLine();
-        $line = nextLine();
+        my $cd = nextCD();
+        ($line = nextLine()) =~ s/builtin-swiftTaskExecution -- |-frontend-parseable-output//g;
         my @sources = extractOption($line, "-primary-file");
         my @objects = extractOption($line, "-o");
         # print "# $line\n@sources -- @objects\n\n";
+        dollarEscape $line;
         foreach my $i (0..$#sources) {
-            my $object = $objects[$i];
+            (my $object = $objects[$i]) =~ s/\\([{}()])/$1/g;
+            $sources[$i] =~ s/\\([\$'&{}()*])/$1/g;
+            $sources[$i] =~ s/\$/\$\$/g;
             next if $rules{$object}++;
-            $line =~ s/builtin-swiftTaskExecution -- |-frontend-parseable-output//g;
             print $MAKE "\n$object: $sources[$i]\n";
-            print $MAKE "\t$cd\n\t$line && touch $object\n\n";
+            pathEscape $object;
+            print $MAKE "\t$cd$line && touch $object\n\n";
         }
     # Add rule to link executables
-    } elsif (my ($executable) = $line =~ /^Ld (\S+?(?:\\.\S+?)*?) /) {
-        my $cd = nextLine();
+    } elsif (my ($executable) = $line =~ /^Ld ($fileArg) /) {
+        my $cd = nextCD();
         $line = nextLine();
         my ($linkfile) = extractOption($line, "-filelist") or next;
         $linkfile =~ s/\\(.)/$1/g;
-        print(">>> Link file: $linkfile\n");
+        print(">>> $executable Link file: $linkfile\n");
         my $OBJS = IO::File->new("< $linkfile") or next;
+        $executable =~ s/([&\$])/\\$1/g;
         print $MAKE "\n$executable:";
         while (my $object = $OBJS->getline()) {
             chomp $object;
-            $object =~ s/([ ])/\\$1/g;
+            $object =~ s/([ '&\$])/\\$1/g;
+            next if $object eq $executable || !$rules{$object};
             print $MAKE " $object";
         }
-        print $MAKE "\n\t$cd\n\t$line";
-        print $MAKE " && codesign -f -s - $executable\n\n";
+        dollarEscape $line;
+        pathEscape my $tosign = $executable;
+        print $MAKE "\n\t$cd$line";
+        print $MAKE " && codesign -f -s '$identity' $tosign\n\n";
         push @linked, $executable if $executable !~ /\.o$/;
     }
 }
