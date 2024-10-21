@@ -27,14 +27,14 @@ system select "Other" and the executable from the file system
 directly in the scheme for the new target. If you encounter 
 errors revert to the default Xcode build system, build then
 try again. If you reorganise the files in the project you 
-should delete the xcodebuild\*.log files in your project
+should delete the xcodemake\*.log files in your project
 root for the derived Makefile to be regenerated.
 
 If you replace `-sdk iphonesimulator` with `-sdk $(PLATFORM_NAME)`
 you can use this "make" based build system for real devices.
 The complication is that, as you need to select the binary
 directly from the filesystem rather than from the menu
-it will not switch automatically and the error message 
-if you forget to do this is not very helpful. You need 
+it will not switch automatically and the error messages 
+if you forget to do this are not very helpful. You need 
 to select it directly as otherwise it creates an implict 
 dependancy of the Xcode build and it will not be faster.
