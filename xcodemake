@@ -12,7 +12,7 @@
 use IO::File;
 use strict;
 
-my $log = "xcodebuild.log";
+my $log = "xcodebuild @ARGV.log";
 my $make = "Makefile";
 
 if (! -f $log) {
@@ -27,7 +27,8 @@ if (! -f $log) {
     my $xcodebin = $ENV{DEVELOPER_BIN_DIR}||'/usr/bin';
     my $archs = $ENV{ARCHS}||'arm64';
     my $args = join ' ', map { "'$_'" } @ARGV;
-    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs -config Debug $args 2>&1 | tee $log";
+    $args .= " -config Debug" if $args !~ /-config/;
+    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs $args 2>&1 | tee '$log'";
     warn "Executing: $build\n";
     if (system $build) {
         unlink $log;
@@ -39,25 +40,35 @@ if (! -f $log) {
 }
 
 # Regenerate Makefile (if script newer)
-if (! -f $make or -M $0 < -M $make) {
-my $LOG = IO::File->new("< $log") or die "Could not open $log: $!";
-my $MAKE = IO::File->new("> $make") or die "Could not open $make: $!";
-my $identity = $ENV{EXPANDED_CODE_SIGN_IDENTITY} || '-';
-print $MAKE "\ndefault: main\n\n";
+generateMakefile() if ! -f $make or -M $0 < -M $make
+    || !`grep 'xcodemake @ARGV' Makefile`;
+
+exit system("make") >> 8;
+
+my ($LOG, $fileArg);
+sub generateMakefile {
+$LOG = IO::File->new("< $log") or die "Could not open $log: $!";
+
+# regex for file path argument
+my $notSpace = "[^\\\\\\s]";
+$fileArg = "$notSpace+(?:\\\\.$notSpace*)*";
+
+sub escape {
+    $_[1] =~ s/([$_[0]])/\\$1/g;
+}
+sub unescape {
+    $_[1] =~ s/\\([$_[0]])/$1/g;
+}
 
 # escape $ for make
 sub dollarEscape {
     $_[0] =~ s/\\\$/\\\$\$/g;
 }
-# esacpe file path
-sub pathEscape {
-    $_[0] =~ s/([()])/\\$1/g;
+# escape file path
+sub shellEscape {
+    escape "()", $_[0];
     dollarEscape $_[0];
 }
-
-# regex for file path argument
-my $notSpace = "[^\\\\\\s]";
-my $fileArg = "$notSpace+(?:\\\\.$notSpace*)*";
 
 sub nextLine {
     my $line = $LOG->getline() or return;
@@ -67,8 +78,8 @@ sub nextLine {
 
 sub nextCD {
     my ($cd) = nextLine() =~ /cd (.*)/;
-    $cd =~ s/\\([^\$'()&])/$1/g;
-    $cd =~ s/([ ])/\\$1/g;
+    unescape "^\$'()&", $cd;
+    escape " ", $cd;
     dollarEscape $cd;
     return "\t\tcd $cd\n\t\t/usr/bin/time ";
 }
@@ -79,8 +90,19 @@ sub extractOption {
     return my @a = $line =~ / $option ($fileArg)/g;
 }
 
-my (%rules, @linked);
+my $identity = $ENV{EXPANDED_CODE_SIGN_IDENTITY} || '-';
+my $MAKE = IO::File->new("> $make") or die "Could not open $make: $!";
+print $MAKE <<HEADER;
+#
+# Generated @{[scalar localtime()]}
+# xcodemake @ARGV
+#
 
+default: main
+
+HEADER
+
+my (%rules, @linked, @codesigns);
 while (defined(my $line = nextLine())) {
     print $MAKE "# $line\n";
     # Add rules for "C" family sources.
@@ -90,30 +112,31 @@ while (defined(my $line = nextLine())) {
         do {
             $line = nextLine();
         } while ($line =~ /^\s*$|response file/);
-        $object =~ s/\\([{}()])/$1/g;
-        $object =~ s/([\$&])/\\$1/g;
+        unescape "{}()", $object;
+        escape "\$&", $object;
         dollarEscape $source;
-        $source =~ s/\\'/'/g;
+        unescape "'", $source;
         print $MAKE "\n$object: $source\n";
-        pathEscape $object;
+        shellEscape $object;
         dollarEscape $line;
         print $MAKE "$cd$line && touch $object\n\n";
     # Add rules for Swift sources (expand batches)
     } elsif ($line =~ /^SwiftCompile \w+ \w+/) {
         my $cd = nextCD();
-        ($line = nextLine()) =~ s/builtin-swiftTaskExecution -- |-frontend-parseable-output//g;
+        ($line = nextLine()) =~
+            s/builtin-swiftTaskExecution -- |-frontend-parseable-output//g;
         my @sources = extractOption($line, "-primary-file")
-            or die "Release/Whole module optimization not permitted";
+            or warn "Release/Whole module optimization not permitted: $line";
         my @objects = extractOption($line, "-o");
         # print "# $line\n@sources -- @objects\n\n";
         dollarEscape $line;
         foreach my $i (0..$#sources) {
-            (my $object = $objects[$i]) =~ s/\\([{}()])/$1/g;
-            $sources[$i] =~ s/\\([\$'&{}()*])/$1/g;
+            unescape "{}()", my $object = $objects[$i];
+            unescape "\$'&{}()*", $sources[$i];
             $sources[$i] =~ s/\$/\$\$/g;
             next if $rules{$object}++;
             print $MAKE "\n$object: $sources[$i]\n";
-            pathEscape $object;
+            shellEscape $object;
             print $MAKE "$cd$line && touch $object\n\n";
         }
     # Add rule to link executables
@@ -122,26 +145,27 @@ while (defined(my $line = nextLine())) {
         $line = nextLine();
         my ($linkfile) = extractOption($line, "-filelist") or next;
         $linkfile =~ s/\\(.)/$1/g;
-        print(">>> $executable Link file: $linkfile\n");
-        my $OBJS = IO::File->new("< $linkfile") or next;
-        $executable =~ s/([&\$])/\\$1/g;
+        print("Link file for $executable: $linkfile\n");
+        my $OBJS = IO::File->new("< $linkfile") || IO::File->new("< /dev/null");
+        escape "&\$", $executable;
         print $MAKE "\n$executable:";
         while (my $object = $OBJS->getline()) {
             chomp $object;
-            $object =~ s/([ '&\$])/\\$1/g;
+            escape " '&\$", $object;
             next if $object eq $executable || !$rules{$object};
             print $MAKE " $object";
         }
         dollarEscape $line;
-        print $MAKE "\n$cd$line";
-        pathEscape my $tosign = $executable;
-        print $MAKE " && codesign -f -s '$identity' $tosign\n\n";
+        print $MAKE "\n$cd$line\n\n";
         push @linked, $executable if $executable !~ /\.o$/;
+    } elsif ($line =~ m@^    /usr/bin/(codesign|touch)@) {
+        dollarEscape $line;
+        push @codesigns, $line;
     }
 }
 
-print $MAKE "main: @linked\n\n";
+print $MAKE "main: @linked\n";
+print $MAKE join "\n", map {"\t$_"} @codesigns;
+print $MAKE "\n";
 close $MAKE;
 }
-
-exit system("make") >> 8;
