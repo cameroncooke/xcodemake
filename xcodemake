@@ -8,6 +8,9 @@
 # the more ponderous xcodebuild for each iteration. Sure,
 # this could be rewritten in python and use ninja instead.
 #
+# xcodebuild re-run if its arguments change or make fails or project modified.
+# Makefile re-generated if script modified or xcodebuild recaptured.
+#
 
 use IO::File;
 use strict;
@@ -15,34 +18,51 @@ use strict;
 my $log = "xcodemake @ARGV.log";
 my $make = "Makefile";
 
-if (! -f $log) {
+my $xcodebuild = ($ENV{DEVELOPER_BIN_DIR}||'/usr/bin')."/xcodebuild";
+my $archs = $ENV{ARCHS}||'arm64';
+my $args = join ' ', map { "'$_'" } @ARGV;
+$args .= " -config Debug" if $args !~ /-config/;
+
+my $variant = "$xcodebuild ARCHS=$archs @ARGV";
+my $builddb = ($ENV{OBJROOT}||'/tmp')."/XCBuildData/build.db";
+my $xcbuild = "/usr/bin/env -i '$xcodebuild' ARCHS=$archs $args";
+my $EXIT_SUCCESS = 0;
+
+# Recapture xcodebuild output if paramaters change or project has been edited
+captureXcodebuild() if ! -f $log || `find . -name project.pbxproj -newer '$log'`;
+
+# Regenerate Makefile (if script newer or different xcodebuild or arguments)
+generateMakefile() if ! -f $make || -M $0 < -M $make || !`grep ' $variant' Makefile`;
+
+exit $EXIT_SUCCESS if $EXIT_SUCCESS == system "make";
+
+rename $builddb, $builddb.".save";
+
+# If xcodebuild compiles, re-capture.
+if ($EXIT_SUCCESS == system $xcbuild) {
+    captureXcodebuild();
+    generateMakefile();
+    exit $EXIT_SUCCESS if $EXIT_SUCCESS == system "make";
+}
+
+rename $builddb.".save", $builddb;
+exit !$EXIT_SUCCESS;
+
+sub captureXcodebuild {
     # Move Xcode's build database to one side to
     # be able to use xcodebuild inside a scheme.
-    my $builddb = $ENV{OBJROOT};
-    if ($builddb) {
-        $builddb .= "/XCBuildData/build.db";
-        rename $builddb, $builddb.".save";
-    }
+    rename $builddb, $builddb.".save";
 
-    my $xcodebin = $ENV{DEVELOPER_BIN_DIR}||'/usr/bin';
-    my $archs = $ENV{ARCHS}||'arm64';
-    my $args = join ' ', map { "'$_'" } @ARGV;
-    $args .= " -config Debug" if $args !~ /-config/;
-    my $build = "'$xcodebin'/xcodebuild clean; /usr/bin/env -i '$xcodebin'/xcodebuild ARCHS=$archs $args 2>&1 | tee '$log'";
+    my $build = "$xcbuild clean; /usr/bin/env -i $xcbuild 2>&1 | tee '$log'";
     warn "Executing: $build\n";
-    if (system $build) {
+    if ($EXIT_SUCCESS != system $build) {
         unlink $log;
-        exit 1;
+        exit !$EXIT_SUCCESS;
     }
     unlink $make;
     
-    rename $builddb.".save", $builddb if $builddb;
+    rename $builddb.".save", $builddb;
 }
-
-# Regenerate Makefile (if script newer or different platform etc.)
-generateMakefile() if ! -f $make || -M $0 < -M $make || !`grep '$log' Makefile`;
-
-exit system("make") >> 8;
 
 my ($LOG, $fileArg);
 sub generateMakefile {
@@ -93,7 +113,7 @@ sub generateMakefile {
     print $MAKE <<HEADER;
 #
 # Generated @{[scalar localtime()]} from
-# $log
+# $variant
 #
 
 default: main
