@@ -2,6 +2,8 @@
 #
 # "xcodemake"
 #
+# Repo: https://github.com/johnno1962/xcodemake
+#
 # A short script to convert xcodebuild output into a Makefile.
 # Once a Makefile has been generated you can use the much
 # faster "make" command for most builds instead of launching
