@@ -29,6 +29,11 @@ my $variant = "$xcodebuild ARCHS=$archs @ARGV";
 my $builddb = ($ENV{OBJROOT}||'/tmp')."/XCBuildData/build.db";
 my $xcbuild = "/usr/bin/env -i '$xcodebuild' ARCHS=$archs $args";
 my $EXIT_SUCCESS = 0;
+my ($LOG, $fileArg);
+
+# regex for file path argument
+my $notSpace = "[^\\\\\\s]";
+$fileArg = "$notSpace+(?:\\\\.$notSpace*)*";
 
 # Recapture xcodebuild output if paramaters change or project has been edited
 captureXcodebuild() if ! -f $log || `find . -name project.pbxproj -newer '$log'`;
@@ -55,9 +60,12 @@ sub captureXcodebuild {
     # be able to use xcodebuild inside a scheme.
     rename $builddb, $builddb.".save";
 
-    my $build = "$xcbuild clean; /usr/bin/env -i $xcbuild 2>&1 | tee '$log'";
-    warn "Executing: $build\n";
-    if ($EXIT_SUCCESS != system $build) {
+    if (my ($bundle) = $variant =~ /-resultBundlePath ($fileArg)/) {
+        $xcbuild = "rm -rf '$bundle'; $xcbuild";
+    }
+    my $command = "$xcbuild clean; $xcbuild 2>&1 | tee '$log'";
+    warn "Executing: $command\n";
+    if ($EXIT_SUCCESS != system $command) {
         unlink $log;
         exit !$EXIT_SUCCESS;
     }
@@ -66,13 +74,8 @@ sub captureXcodebuild {
     rename $builddb.".save", $builddb;
 }
 
-my ($LOG, $fileArg);
 sub generateMakefile {
     $LOG = IO::File->new("< $log") or die "Could not open $log: $!";
-
-    # regex for file path argument
-    my $notSpace = "[^\\\\\\s]";
-    $fileArg = "$notSpace+(?:\\\\.$notSpace*)*";
 
     sub escape {
         $_[1] =~ s/([$_[0]])/\\$1/g;
