@@ -115,8 +115,8 @@ sub captureXcodebuild {
     # Use the *original* @ARGV captured at the script start
     my @cmd_args = @original_ARGV;
     # Add default -config Debug if necessary *to the list*
-    # Check original args again to decide if we need to add it
-    my $has_config = grep { /^-config$/ } @original_ARGV;
+    # Check original args for all possible configuration argument formats
+    my $has_config = grep { /^-config$/ || /^--config$/ || /^-configuration$/ || /^--configuration$/ } @original_ARGV;
     push @cmd_args, ('-config', 'Debug') unless $has_config;
 
 
